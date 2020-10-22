@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -21,18 +22,38 @@ import (
 
 // PeerStatus contains information about a single peer
 type PeerStatus struct {
-	ipnPeerStatus    ipnstate.PeerStatus
-	ipnPingResult    ipnstate.PingResult
-	lastPingRequest  time.Time
-	lastPingResponse time.Time
+	IpnPeerStatus    ipnstate.PeerStatus
+	IpnPingResult    ipnstate.PingResult // Might be default if no ping response was ever received
+	LastPingRequest  time.Time
+	LastPingResponse time.Time
 	firstSeen        time.Time
 }
 
-func (ps *PeerStatus) String() string {
-	return fmt.Sprintf("Tailscale IP: %v, Node Name: %v, lastPingResponse: %v, lastPingRequest: %v\n",
-		ps.ipnPeerStatus.TailAddr, ps.ipnPeerStatus.SimpleHostName(), ps.lastPingResponse, ps.lastPingRequest)
+// TailScale IP of the Peer
+func (ps *PeerStatus) IP() string {
+	return ps.IpnPeerStatus.TailAddr
 }
 
+// Returns true if response from this Peer has ever been received
+func (ps *PeerStatus) HasBeenPinged() bool {
+	return !ps.LastPingResponse.IsZero()
+}
+
+// Latency to ping the Peer. If peer has been inactive then returns math.MaxFloat64
+func (ps *PeerStatus) LatencyInSeconds() float64 {
+	if !ps.HasBeenPinged() {
+		return math.MaxFloat64
+	}
+
+	return ps.IpnPingResult.LatencySeconds
+}
+
+func (ps *PeerStatus) String() string {
+	return fmt.Sprintf("Tailscale IP: %v, Node Name: %v, LastPingResponse: %v, LastPingRequest: %v\n",
+		ps.IpnPeerStatus.TailAddr, ps.IpnPeerStatus.SimpleHostName(), ps.LastPingResponse, ps.LastPingRequest)
+}
+
+// Set of options, mainly targeted to membership
 type Options struct {
 	InactivityTimeLimit           time.Duration // Time after which a node is considered inactive
 	HeartbeatInterval             time.Duration // Interval between subsequent heartbeats
@@ -48,21 +69,36 @@ func NewOptions() *Options {
 	return op
 }
 
+type PingRequest struct {
+	*ipnstate.PeerStatus
+	CurrentPingAt time.Time
+	PrevPingAt    time.Time
+}
+
+func NewPingRequest(ps *PeerStatus, pingTime time.Time) *PingRequest {
+	return &PingRequest{CurrentPingAt: pingTime, PrevPingAt: ps.LastPingRequest, PeerStatus: &ps.IpnPeerStatus}
+}
+
+type Notify struct {
+	ipn.Notify
+	PingRequest *PingRequest
+}
+
 // TailScaleMemClient is tailscale client connected to the tailScale client daemon running on the machine.
 // In addition to the connection to tailScale client daemon, this also tracks the peerStatus by sending heartbeat pings
 // to all peers and collecting their status periodically
 type TailScaleMemClient struct {
-	sync.RWMutex                          // Lock to prevent concurrent modification, mainly peers map
-	conn           net.Conn               // The connection to the tailScale client daemon
-	NotificationCh chan ipn.Notify        // Receives notification from tailScale client daemon
-	bc             *ipn.BackendClient     // TailScale backend client to the daemon
-	peers          map[string]*PeerStatus // map from TailScale IP to PeerStatus
-	statusTicker   *time.Ticker           // Ticker for heartbeat ping message & status update
+	sync.RWMutex                        // Lock to prevent concurrent modification, mainly peers map
+	conn         net.Conn               // The connection to the tailScale client daemon
+	ListenerCh   chan Notify            // Event receiver for tailScale daemon & membership events
+	bc           *ipn.BackendClient     // TailScale backend client to the daemon
+	peers        map[string]*PeerStatus // map from TailScale IP to PeerStatus
+	statusTicker *time.Ticker           // Ticker for heartbeat ping message & status update
 	*Options
 }
 
-// Start creates a new TailScaleMemClient and attaches a tailScale client to machine's running daemon
-func Start(ctx context.Context, options *Options) *TailScaleMemClient {
+// NewTailScaleMemClient creates a new TailScaleMemClient and attaches a tailScale client to machine's running daemon
+func NewTailScaleMemClient(ctx context.Context, options *Options) *TailScaleMemClient {
 	tsc := &TailScaleMemClient{}
 	tsc.peers = make(map[string]*PeerStatus)
 	if options == nil {
@@ -70,7 +106,7 @@ func Start(ctx context.Context, options *Options) *TailScaleMemClient {
 	}
 	tsc.Options = options
 
-	if err := tsc.startBackendClient(ctx); err != nil {
+	if err := tsc.start(ctx); err != nil {
 		log.Fatalf("couldn't start backend client: %v\n", err)
 	}
 
@@ -102,12 +138,26 @@ func (tsc *TailScaleMemClient) ActivePeers() []PeerStatus {
 	return activePeers
 }
 
-// isActive informs whether the peer is active given its lastPingResponse
-func (tsc *TailScaleMemClient) isActive(ps *PeerStatus) bool {
-	return !ps.lastPingResponse.IsZero() && time.Since(ps.lastPingResponse) < tsc.InactivityTimeLimit
+// ActivePeers returns a list of current snapshot of peers
+func (tsc *TailScaleMemClient) AllPeers() []PeerStatus {
+	var allPeers []PeerStatus
+	tsc.RLock()
+	defer tsc.RUnlock()
+	for _, ps := range tsc.peers {
+		allPeers = append(allPeers, *ps)
+	}
+	return allPeers
 }
 
-func (tsc *TailScaleMemClient) startBackendClient(ctx context.Context) error {
+// isActive informs whether the peer is active given its LastPingResponse
+// Peer's activeness is from the perspective of the calling node. i.e, Peer A could be inactive according
+// to this node but could be active wrt to all other nodes
+func (tsc *TailScaleMemClient) isActive(ps *PeerStatus) bool {
+	return !ps.LastPingResponse.IsZero() && time.Since(ps.LastPingResponse) < tsc.InactivityTimeLimit
+}
+
+// starts backend client to tailscale daemon
+func (tsc *TailScaleMemClient) start(ctx context.Context) error {
 	verifyTailScaleDaemonRunning()
 	// create socket connection with ts running on machine
 	var err error
@@ -155,10 +205,7 @@ func (tsc *TailScaleMemClient) handleNotificationCallback(notify ipn.Notify) {
 		// TODO: check if we need to do something about this
 	}
 
-	// notify listeners if any
-	if tsc.NotificationCh != nil {
-		tsc.NotificationCh <- notify
-	}
+	tsc.informListener(Notify{notify, nil})
 
 }
 
@@ -187,11 +234,11 @@ func (tsc *TailScaleMemClient) updatePeerStatus(peers map[key.Public]*ipnstate.P
 		tsip := status.TailAddr
 		currentPeerSet[tsip] = true
 		if _, ok := tsc.peers[tsip]; !ok {
-			// New peer found
+			// NewTailScaleMemClient peer found
 			tsc.peers[tsip] = &PeerStatus{firstSeen: time.Now()}
 		}
-		// update ipnPeerStatus
-		tsc.peers[tsip].ipnPeerStatus = *status
+		// update IpnPeerStatus
+		tsc.peers[tsip].IpnPeerStatus = *status
 		log.Printf(tsc.peers[tsip].String())
 	}
 
@@ -212,8 +259,8 @@ func (tsc *TailScaleMemClient) updatePingResult(pingResult *ipnstate.PingResult)
 		// should not be the case but could've been removed in the mean time
 		return
 	}
-	ps.lastPingResponse = time.Now()
-	ps.ipnPingResult = *pingResult
+	ps.LastPingResponse = time.Now()
+	ps.IpnPingResult = *pingResult
 }
 
 // checks status periodically for every `HeartbeatInterval`
@@ -242,8 +289,8 @@ func (tsc *TailScaleMemClient) triggerHeartbeat() {
 	for peerIP, peerStatus := range tsc.peers {
 		if !tsc.isActive(peerStatus) {
 			// For inactive peer ping iff lastPing was before InactivePeerHeartBeatInterval
-			if peerStatus.lastPingRequest.IsZero() ||
-				time.Since(peerStatus.lastPingRequest) >= tsc.InactivePeerHeartBeatInterval {
+			if peerStatus.LastPingRequest.IsZero() ||
+				time.Since(peerStatus.LastPingRequest) >= tsc.InactivePeerHeartBeatInterval {
 				tsc.pingPeer(peerIP, peerStatus)
 			}
 		} else {
@@ -253,11 +300,21 @@ func (tsc *TailScaleMemClient) triggerHeartbeat() {
 	}
 }
 
-// wrapper around ping for logging
+// wrapper around ping for updating state & event
 func (tsc *TailScaleMemClient) pingPeer(peerIP string, peerStatus *PeerStatus) {
 	log.Printf("Pinging %v for membership\n", peerIP)
 	tsc.bc.Ping(peerIP)
-	peerStatus.lastPingRequest = time.Now()
+	pingTime := time.Now()
+	tsc.informListener(Notify{PingRequest: NewPingRequest(peerStatus, pingTime)})
+	// update this after informing listener about ping request, else we'll update the last ping request
+	peerStatus.LastPingRequest = pingTime
+}
+
+// notify listeners if any
+func (tsc *TailScaleMemClient) informListener(notify Notify) {
+	if tsc.ListenerCh != nil {
+		tsc.ListenerCh <- notify
+	}
 }
 
 // runNotificationReader listens for any message from tailscale daemon and calls handleNotificationCallback
@@ -288,5 +345,10 @@ func (tsc *TailScaleMemClient) runNotificationReader(ctx context.Context) {
 
 func (tsc *TailScaleMemClient) close() {
 	_ = tsc.conn.Close()
-	close(tsc.NotificationCh)
+	tsc.statusTicker.Stop()
+	if tsc.ListenerCh != nil {
+		ch := tsc.ListenerCh
+		tsc.ListenerCh = nil
+		close(ch)
+	}
 }
