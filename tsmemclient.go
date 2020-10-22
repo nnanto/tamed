@@ -58,6 +58,8 @@ type Options struct {
 	InactivityTimeLimit           time.Duration // Time after which a node is considered inactive
 	HeartbeatInterval             time.Duration // Interval between subsequent heartbeats
 	InactivePeerHeartBeatInterval time.Duration // Time after which an inactive peer should be pinged
+	TailScaleSocket               string
+	ListenerCh                    chan Notify
 }
 
 func NewOptions() *Options {
@@ -65,6 +67,7 @@ func NewOptions() *Options {
 		InactivityTimeLimit:           2 * time.Minute,
 		HeartbeatInterval:             5 * time.Second,
 		InactivePeerHeartBeatInterval: 1 * time.Minute,
+		TailScaleSocket:               paths.DefaultTailscaledSocket(),
 	}
 	return op
 }
@@ -90,7 +93,7 @@ type Notify struct {
 type TailScaleMemClient struct {
 	sync.RWMutex                        // Lock to prevent concurrent modification, mainly peers map
 	conn         net.Conn               // The connection to the tailScale client daemon
-	ListenerCh   chan Notify            // Event receiver for tailScale daemon & membership events
+	listener     chan Notify            // Event receiver for tailScale daemon & membership events
 	bc           *ipn.BackendClient     // TailScale backend client to the daemon
 	peers        map[string]*PeerStatus // map from TailScale IP to PeerStatus
 	statusTicker *time.Ticker           // Ticker for heartbeat ping message & status update
@@ -105,7 +108,7 @@ func NewTailScaleMemClient(ctx context.Context, options *Options) *TailScaleMemC
 		options = NewOptions()
 	}
 	tsc.Options = options
-
+	tsc.listener = options.ListenerCh
 	if err := tsc.start(ctx); err != nil {
 		log.Fatalf("couldn't start backend client: %v\n", err)
 	}
@@ -158,10 +161,10 @@ func (tsc *TailScaleMemClient) isActive(ps *PeerStatus) bool {
 
 // starts backend client to tailscale daemon
 func (tsc *TailScaleMemClient) start(ctx context.Context) error {
-	verifyTailScaleDaemonRunning()
+	//verifyTailScaleDaemonRunning()
 	// create socket connection with ts running on machine
 	var err error
-	tsc.conn, err = safesocket.Connect(paths.DefaultTailscaledSocket(), 41112)
+	tsc.conn, err = safesocket.Connect(tsc.TailScaleSocket, 41112)
 	if err != nil {
 		return err
 	}
@@ -312,8 +315,8 @@ func (tsc *TailScaleMemClient) pingPeer(peerIP string, peerStatus *PeerStatus) {
 
 // notify listeners if any
 func (tsc *TailScaleMemClient) informListener(notify Notify) {
-	if tsc.ListenerCh != nil {
-		tsc.ListenerCh <- notify
+	if tsc.listener != nil {
+		tsc.listener <- notify
 	}
 }
 
@@ -346,9 +349,9 @@ func (tsc *TailScaleMemClient) runNotificationReader(ctx context.Context) {
 func (tsc *TailScaleMemClient) close() {
 	_ = tsc.conn.Close()
 	tsc.statusTicker.Stop()
-	if tsc.ListenerCh != nil {
-		ch := tsc.ListenerCh
-		tsc.ListenerCh = nil
+	if tsc.listener != nil {
+		ch := tsc.listener
+		tsc.listener = nil
 		close(ch)
 	}
 }
