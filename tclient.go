@@ -2,6 +2,7 @@ package tamed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -103,13 +104,16 @@ type Client struct {
 	bc           *ipn.BackendClient     // TailScale backend client to the daemon
 	peers        map[string]*PeerStatus // map from TailScale IP to PeerStatus
 	statusTicker *time.Ticker           // Ticker for heartbeat ping message & status update
+	cls          chan struct{}          // channel to notify close
 	*Option
 }
 
 // Start attaches a tailScale client to machine's running daemon
 func Start(ctx context.Context, options *Option) *Client {
-	t := &Client{}
-	t.peers = make(map[string]*PeerStatus)
+	t := &Client{
+		peers:make(map[string]*PeerStatus),
+		cls : make(chan struct{}),
+	}
 	if options == nil {
 		options = DefaultOptions()
 	}
@@ -186,7 +190,13 @@ func (c *Client) start(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := ipn.WriteMsg(c.conn, data); err != nil {
+		// allow version skewing
+		cmd := &ipn.Command{}
+		_ = json.Unmarshal(data, cmd)
+		cmd.AllowVersionSkew = true
+		b, _ := json.Marshal(cmd)
+
+		if err := ipn.WriteMsg(c.conn, b); err != nil {
 			log.Fatalf("error while sending command to ts backend (%v)", err)
 		}
 	})
@@ -289,6 +299,9 @@ func (c *Client) heartbeat(ctx context.Context) {
 		case <-c.statusTicker.C:
 			c.triggerHeartbeat()
 
+		case <-c.cls:
+			return
+
 		case <-ctx.Done():
 			return
 		}
@@ -341,6 +354,8 @@ func (c *Client) runNotificationReader(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-c.cls:
+			return
 		default:
 			// read from connection
 			msg, err := ipn.ReadMsg(c.conn)
@@ -361,11 +376,16 @@ func (c *Client) runNotificationReader(ctx context.Context) {
 }
 
 func (c *Client) close() {
+	close(c.cls)
+	c.Logf("stopped all long running loops")
 	_ = c.conn.Close()
 	c.statusTicker.Stop()
+	c.Logf("closed connection and ticker")
 	if c.listener != nil {
 		ch := c.listener
 		c.listener = nil
+
 		close(ch)
+		c.Logf("closed external listener")
 	}
 }
