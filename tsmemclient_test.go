@@ -3,6 +3,7 @@ package tamp
 import (
 	"context"
 	"github.com/stretchr/testify/require"
+	"log"
 	"testing"
 	"time"
 )
@@ -10,10 +11,11 @@ import (
 //TODO: change this by using fake ts daemon if possible
 func TestStart(t *testing.T) {
 	ctx, done := context.WithCancel(context.Background())
-	op := NewOptions()
+	op := DefaultOptions()
 	op.InactivityTimeLimit = 10 * time.Second
 	op.InactivePeerHeartBeatInterval = 10 * time.Second
 	op.ListenerCh = make(chan Notify, 1)
+	op.Logger = log.Printf
 	tsc := NewTailScaleMemClient(ctx, op)
 	var statusTicks uint64 = 0
 	go func() {
@@ -63,7 +65,7 @@ func TestStart(t *testing.T) {
 //	connect := func() {
 //		for i := 1; i <= 2; i++ {
 //			logf("connect %d ...", i)
-//			op := NewOptions()
+//			op := DefaultOptions()
 //			op.InactivityTimeLimit = 10 * time.Second
 //			op.InactivePeerHeartBeatInterval = 10 * time.Second
 //			op.TailScaleSocket = socketPath
@@ -94,7 +96,7 @@ func TestStart(t *testing.T) {
 //	}
 //	defer eng.Close()
 //
-//	opts := ipnserver.Options{
+//	opts := ipnserver.TSMOption{
 //		SocketPath: socketPath,
 //	}
 //	t.Logf("pre-Run")
