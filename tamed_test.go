@@ -16,7 +16,7 @@ func TestStart(t *testing.T) {
 	op.InactivePeerHeartBeatInterval = 10 * time.Second
 	op.ListenerCh = make(chan Notify, 1)
 	op.Logger = log.Printf
-	tsc := NewTailScaleMemClient(ctx, op)
+	tsc := Start(ctx, op)
 	var statusTicks uint64 = 0
 	go func() {
 		for n := range op.ListenerCh {
@@ -71,7 +71,7 @@ func TestStart(t *testing.T) {
 //			op.TailScaleSocket = socketPath
 //			op.ListenerCh = make(chan Notify, 1)
 //
-//			tsc := NewTailScaleMemClient(ctx, op)
+//			tsc := Start(ctx, op)
 //			go func(conn int) {
 //				for n := range op.ListenerCh  {
 //					if n.PingResult != nil {
@@ -96,7 +96,7 @@ func TestStart(t *testing.T) {
 //	}
 //	defer eng.Close()
 //
-//	opts := ipnserver.TSMOption{
+//	opts := ipnserver.TamedOption{
 //		SocketPath: socketPath,
 //	}
 //	t.Logf("pre-Run")

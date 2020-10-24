@@ -54,7 +54,7 @@ func (ps *PeerStatus) String() string {
 }
 
 // Set of options, mainly targeted to membership
-type TSMOption struct {
+type TamedOption struct {
 	InactivityTimeLimit           time.Duration // Time after which a node is considered inactive
 	HeartbeatInterval             time.Duration // Interval between subsequent heartbeats
 	InactivePeerHeartBeatInterval time.Duration // Time after which an inactive peer should be pinged
@@ -63,8 +63,8 @@ type TSMOption struct {
 	Logger                        func(string, ...interface{})
 }
 
-func DefaultOptions() *TSMOption {
-	op := &TSMOption{
+func DefaultOptions() *TamedOption {
+	op := &TamedOption{
 		InactivityTimeLimit:           2 * time.Minute,
 		HeartbeatInterval:             5 * time.Second,
 		InactivePeerHeartBeatInterval: 1 * time.Minute,
@@ -93,29 +93,29 @@ type Notify struct {
 	PeerRemoved *PeerRemoved
 }
 
-// TailScaleMemClient is tailscale client connected to the tailScale client daemon running on the machine.
+// Tamed is TailScale as Membership Discovery client client connected to the tailScale daemon running on the machine.
 // In addition to the connection to tailScale client daemon, this also tracks the peerStatus by sending heartbeat pings
 // to all peers and collecting their status periodically
-type TailScaleMemClient struct {
+type Tamed struct {
 	sync.RWMutex                        // Lock to prevent concurrent modification, mainly peers map
 	conn         net.Conn               // The connection to the tailScale client daemon
 	listener     chan Notify            // Event receiver for tailScale daemon & membership events
 	bc           *ipn.BackendClient     // TailScale backend client to the daemon
 	peers        map[string]*PeerStatus // map from TailScale IP to PeerStatus
 	statusTicker *time.Ticker           // Ticker for heartbeat ping message & status update
-	*TSMOption
+	*TamedOption
 }
 
-// NewTailScaleMemClient creates a new TailScaleMemClient and attaches a tailScale client to machine's running daemon
-func NewTailScaleMemClient(ctx context.Context, options *TSMOption) *TailScaleMemClient {
-	tsc := &TailScaleMemClient{}
-	tsc.peers = make(map[string]*PeerStatus)
+// Start attaches a tailScale client to machine's running daemon
+func Start(ctx context.Context, options *TamedOption) *Tamed {
+	t := &Tamed{}
+	t.peers = make(map[string]*PeerStatus)
 	if options == nil {
 		options = DefaultOptions()
 	}
-	tsc.TSMOption = options
-	tsc.listener = options.ListenerCh
-	if err := tsc.start(ctx); err != nil {
+	t.TamedOption = options
+	t.listener = options.ListenerCh
+	if err := t.start(ctx); err != nil {
 		log.Fatalf("couldn't start backend client: %v\n", err)
 	}
 
@@ -128,25 +128,25 @@ func NewTailScaleMemClient(ctx context.Context, options *TSMOption) *TailScaleMe
 		case <-interrupt:
 		case <-ctx.Done():
 		}
-		tsc.close()
+		t.close()
 	}()
 
-	return tsc
+	return t
 }
 
-func (tsc *TailScaleMemClient) Logf(format string, args ...interface{}) {
-	if tsc.Logger != nil {
-		tsc.Logger(format, args...)
+func (t *Tamed) Logf(format string, args ...interface{}) {
+	if t.Logger != nil {
+		t.Logger(format, args...)
 	}
 }
 
 // ActivePeers returns a list of active peers from the current snapshot of peers
-func (tsc *TailScaleMemClient) ActivePeers() []PeerStatus {
+func (t *Tamed) ActivePeers() []PeerStatus {
 	var activePeers []PeerStatus
-	tsc.RLock()
-	defer tsc.RUnlock()
-	for _, ps := range tsc.peers {
-		if tsc.isActive(ps) {
+	t.RLock()
+	defer t.RUnlock()
+	for _, ps := range t.peers {
+		if t.isActive(ps) {
 			activePeers = append(activePeers, *ps)
 		}
 	}
@@ -154,11 +154,11 @@ func (tsc *TailScaleMemClient) ActivePeers() []PeerStatus {
 }
 
 // ActivePeers returns a list of current snapshot of peers
-func (tsc *TailScaleMemClient) AllPeers() []PeerStatus {
+func (t *Tamed) AllPeers() []PeerStatus {
 	var allPeers []PeerStatus
-	tsc.RLock()
-	defer tsc.RUnlock()
-	for _, ps := range tsc.peers {
+	t.RLock()
+	defer t.RUnlock()
+	for _, ps := range t.peers {
 		allPeers = append(allPeers, *ps)
 	}
 	return allPeers
@@ -167,60 +167,60 @@ func (tsc *TailScaleMemClient) AllPeers() []PeerStatus {
 // isActive informs whether the peer is active given its LastPingResponse
 // Peer's activeness is from the perspective of the calling node. i.e, Peer A could be inactive according
 // to this node but could be active wrt to all other nodes
-func (tsc *TailScaleMemClient) isActive(ps *PeerStatus) bool {
-	return !ps.LastPingResponse.IsZero() && time.Since(ps.LastPingResponse) < tsc.InactivityTimeLimit
+func (t *Tamed) isActive(ps *PeerStatus) bool {
+	return !ps.LastPingResponse.IsZero() && time.Since(ps.LastPingResponse) < t.InactivityTimeLimit
 }
 
 // starts backend client to tailscale daemon
-func (tsc *TailScaleMemClient) start(ctx context.Context) error {
+func (t *Tamed) start(ctx context.Context) error {
 	//verifyTailScaleDaemonRunning()
 	// create socket connection with ts running on machine
 	var err error
-	tsc.conn, err = safesocket.Connect(tsc.TailScaleSocket, 41112)
+	t.conn, err = safesocket.Connect(t.TailScaleSocket, 41112)
 	if err != nil {
 		return err
 	}
 
 	// create a backend client to communicate with running ts backend
-	tsc.bc = ipn.NewBackendClient(tsc.Logf, func(data []byte) {
+	t.bc = ipn.NewBackendClient(t.Logf, func(data []byte) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := ipn.WriteMsg(tsc.conn, data); err != nil {
+		if err := ipn.WriteMsg(t.conn, data); err != nil {
 			log.Fatalf("error while sending command to ts backend (%v)", err)
 		}
 	})
-	tsc.bc.AllowVersionSkew = true
+	t.bc.AllowVersionSkew = true
 
 	// set notification callback for ts events
-	tsc.bc.SetNotifyCallback(tsc.handleNotificationCallback)
+	t.bc.SetNotifyCallback(t.handleNotificationCallback)
 
 	// start timer once we've client ready
-	tsc.statusTicker = time.NewTicker(tsc.HeartbeatInterval)
+	t.statusTicker = time.NewTicker(t.HeartbeatInterval)
 
-	go tsc.runNotificationReader(ctx)
-	go tsc.heartbeat(ctx)
+	go t.runNotificationReader(ctx)
+	go t.heartbeat(ctx)
 
 	return nil
 }
 
-func (tsc *TailScaleMemClient) handleNotificationCallback(notify ipn.Notify) {
+func (t *Tamed) handleNotificationCallback(notify ipn.Notify) {
 
 	if notify.ErrMessage != nil {
 		log.Fatalf("notification error from ts backend (%v)", *notify.ErrMessage)
 	}
 	// TODO: handle state
 	if notify.Status != nil {
-		tsc.updatePeerStatus(notify.Status.Peer)
+		t.updatePeerStatus(notify.Status.Peer)
 	} else if notify.NetMap != nil {
 		// TODO: check if we need to do something about this
 	} else if notify.PingResult != nil {
-		tsc.updatePingResult(notify.PingResult)
+		t.updatePingResult(notify.PingResult)
 	} else if notify.Engine != nil {
 		// TODO: check if we need to do something about this
 	}
 
-	tsc.informListener(Notify{Notify: notify})
+	t.informListener(Notify{Notify: notify})
 
 }
 
@@ -235,12 +235,12 @@ func verifyTailScaleDaemonRunning() {
 	if ip == nil || inf == nil {
 		log.Fatalf(errmsg)
 	}
-	//tsc.Logf("ts backend is running in IP [%v], Interface [%v]", ip.String(), inf.Name)
+	//t.Logf("ts backend is running in IP [%v], Interface [%v]", ip.String(), inf.Name)
 }
 
-func (tsc *TailScaleMemClient) updatePeerStatus(peers map[key.Public]*ipnstate.PeerStatus) {
-	tsc.Lock()
-	defer tsc.Unlock()
+func (t *Tamed) updatePeerStatus(peers map[key.Public]*ipnstate.PeerStatus) {
+	t.Lock()
+	defer t.Unlock()
 
 	// List of peers we see in the current status
 	currentPeerSet := make(map[string]bool) // map of tailscale ip and presence
@@ -248,29 +248,29 @@ func (tsc *TailScaleMemClient) updatePeerStatus(peers map[key.Public]*ipnstate.P
 	for _, status := range peers {
 		tsip := status.TailAddr
 		currentPeerSet[tsip] = true
-		if _, ok := tsc.peers[tsip]; !ok {
-			// NewTailScaleMemClient peer found
-			tsc.peers[tsip] = &PeerStatus{firstSeen: time.Now()}
+		if _, ok := t.peers[tsip]; !ok {
+			// Start peer found
+			t.peers[tsip] = &PeerStatus{firstSeen: time.Now()}
 		}
 		// update IpnPeerStatus
-		tsc.peers[tsip].IpnPeerStatus = *status
-		tsc.Logf(tsc.peers[tsip].String())
+		t.peers[tsip].IpnPeerStatus = *status
+		t.Logf(t.peers[tsip].String())
 	}
 
-	for tsip, peer := range tsc.peers {
+	for tsip, peer := range t.peers {
 		if _, ok := currentPeerSet[tsip]; !ok {
 			// This peer has been removed so delete from our list of peers
-			tsc.informListener(Notify{PeerRemoved: &PeerRemoved{&peer.IpnPeerStatus}})
-			delete(tsc.peers, tsip)
+			t.informListener(Notify{PeerRemoved: &PeerRemoved{&peer.IpnPeerStatus}})
+			delete(t.peers, tsip)
 		}
 	}
 }
 
-func (tsc *TailScaleMemClient) updatePingResult(pingResult *ipnstate.PingResult) {
-	tsc.Lock()
-	defer tsc.Unlock()
+func (t *Tamed) updatePingResult(pingResult *ipnstate.PingResult) {
+	t.Lock()
+	defer t.Unlock()
 	tsip := pingResult.NodeIP
-	ps, ok := tsc.peers[tsip]
+	ps, ok := t.peers[tsip]
 	if !ok || ps == nil {
 		// should not be the case but could've been removed in the mean time
 		return
@@ -280,14 +280,14 @@ func (tsc *TailScaleMemClient) updatePingResult(pingResult *ipnstate.PingResult)
 }
 
 // checks status periodically for every `HeartbeatInterval`
-func (tsc *TailScaleMemClient) heartbeat(ctx context.Context) {
+func (t *Tamed) heartbeat(ctx context.Context) {
 	// initialize peer status by triggering a heartbeat
-	tsc.triggerHeartbeat()
+	t.triggerHeartbeat()
 
 	for {
 		select {
-		case <-tsc.statusTicker.C:
-			tsc.triggerHeartbeat()
+		case <-t.statusTicker.C:
+			t.triggerHeartbeat()
 
 		case <-ctx.Done():
 			return
@@ -295,47 +295,47 @@ func (tsc *TailScaleMemClient) heartbeat(ctx context.Context) {
 	}
 }
 
-func (tsc *TailScaleMemClient) triggerHeartbeat() {
-	tsc.Logf("Heart beat triggered at %v\n", time.Now().Format(time.UnixDate))
-	tsc.bc.RequestStatus()
+func (t *Tamed) triggerHeartbeat() {
+	t.Logf("Heart beat triggered at %v\n", time.Now().Format(time.UnixDate))
+	t.bc.RequestStatus()
 
-	tsc.Lock()
-	defer tsc.Unlock()
+	t.Lock()
+	defer t.Unlock()
 
-	for peerIP, peerStatus := range tsc.peers {
-		if !tsc.isActive(peerStatus) {
+	for peerIP, peerStatus := range t.peers {
+		if !t.isActive(peerStatus) {
 			// For inactive peer ping iff lastPing was before InactivePeerHeartBeatInterval
 			if peerStatus.LastPingRequest.IsZero() ||
-				time.Since(peerStatus.LastPingRequest) >= tsc.InactivePeerHeartBeatInterval {
-				tsc.pingPeer(peerIP, peerStatus)
+				time.Since(peerStatus.LastPingRequest) >= t.InactivePeerHeartBeatInterval {
+				t.pingPeer(peerIP, peerStatus)
 			}
 		} else {
 			// TODO: optimize calling of ping if we've talked to this IP in the mean time
-			tsc.pingPeer(peerIP, peerStatus)
+			t.pingPeer(peerIP, peerStatus)
 		}
 
 	}
 }
 
 // wrapper around ping for updating state & event
-func (tsc *TailScaleMemClient) pingPeer(peerIP string, peerStatus *PeerStatus) {
-	tsc.Logf("Pinging %v for membership\n", peerIP)
-	tsc.bc.Ping(peerIP)
+func (t *Tamed) pingPeer(peerIP string, peerStatus *PeerStatus) {
+	t.Logf("Pinging %v for membership\n", peerIP)
+	t.bc.Ping(peerIP)
 	pingTime := time.Now()
-	tsc.informListener(Notify{PingRequest: NewPingRequest(peerStatus, pingTime)})
+	t.informListener(Notify{PingRequest: NewPingRequest(peerStatus, pingTime)})
 	// update this after informing listener about ping request, else we'll update the last ping request
 	peerStatus.LastPingRequest = pingTime
 }
 
 // notify listeners if any
-func (tsc *TailScaleMemClient) informListener(notify Notify) {
-	if tsc.listener != nil {
-		tsc.listener <- notify
+func (t *Tamed) informListener(notify Notify) {
+	if t.listener != nil {
+		t.listener <- notify
 	}
 }
 
 // runNotificationReader listens for any message from tailscale daemon and calls handleNotificationCallback
-func (tsc *TailScaleMemClient) runNotificationReader(ctx context.Context) {
+func (t *Tamed) runNotificationReader(ctx context.Context) {
 
 	for {
 		select {
@@ -343,29 +343,29 @@ func (tsc *TailScaleMemClient) runNotificationReader(ctx context.Context) {
 			return
 		default:
 			// read from connection
-			msg, err := ipn.ReadMsg(tsc.conn)
+			msg, err := ipn.ReadMsg(t.conn)
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					// ignorable error
-					tsc.Logf("use of closed connection\n")
+					t.Logf("use of closed connection\n")
 				} else {
 					log.Fatalf("error while reading notification: %v\n", err)
 				}
 			}
 			if ctx.Err() == nil {
 				// send notification message to the callback
-				tsc.bc.GotNotifyMsg(msg)
+				t.bc.GotNotifyMsg(msg)
 			}
 		}
 	}
 }
 
-func (tsc *TailScaleMemClient) close() {
-	_ = tsc.conn.Close()
-	tsc.statusTicker.Stop()
-	if tsc.listener != nil {
-		ch := tsc.listener
-		tsc.listener = nil
+func (t *Tamed) close() {
+	_ = t.conn.Close()
+	t.statusTicker.Stop()
+	if t.listener != nil {
+		ch := t.listener
+		t.listener = nil
 		close(ch)
 	}
 }
