@@ -1,4 +1,4 @@
-package tamp
+package tamed
 
 import (
 	"context"
@@ -54,7 +54,7 @@ func (ps *PeerStatus) String() string {
 }
 
 // Set of options, mainly targeted to membership
-type TamedOption struct {
+type Option struct {
 	InactivityTimeLimit           time.Duration // Time after which a node is considered inactive
 	HeartbeatInterval             time.Duration // Interval between subsequent heartbeats
 	InactivePeerHeartBeatInterval time.Duration // Time after which an inactive peer should be pinged
@@ -63,8 +63,8 @@ type TamedOption struct {
 	Logger                        func(string, ...interface{})
 }
 
-func DefaultOptions() *TamedOption {
-	op := &TamedOption{
+func DefaultOptions() *Option {
+	op := &Option{
 		InactivityTimeLimit:           2 * time.Minute,
 		HeartbeatInterval:             5 * time.Second,
 		InactivePeerHeartBeatInterval: 1 * time.Minute,
@@ -93,27 +93,27 @@ type Notify struct {
 	PeerRemoved *PeerRemoved
 }
 
-// Tamed is TailScale as Membership Discovery client client connected to the tailScale daemon running on the machine.
+// Client is TailScale as Membership Discovery client client connected to the tailScale daemon running on the machine.
 // In addition to the connection to tailScale client daemon, this also tracks the peerStatus by sending heartbeat pings
 // to all peers and collecting their status periodically
-type Tamed struct {
+type Client struct {
 	sync.RWMutex                        // Lock to prevent concurrent modification, mainly peers map
 	conn         net.Conn               // The connection to the tailScale client daemon
 	listener     chan Notify            // Event receiver for tailScale daemon & membership events
 	bc           *ipn.BackendClient     // TailScale backend client to the daemon
 	peers        map[string]*PeerStatus // map from TailScale IP to PeerStatus
 	statusTicker *time.Ticker           // Ticker for heartbeat ping message & status update
-	*TamedOption
+	*Option
 }
 
 // Start attaches a tailScale client to machine's running daemon
-func Start(ctx context.Context, options *TamedOption) *Tamed {
-	t := &Tamed{}
+func Start(ctx context.Context, options *Option) *Client {
+	t := &Client{}
 	t.peers = make(map[string]*PeerStatus)
 	if options == nil {
 		options = DefaultOptions()
 	}
-	t.TamedOption = options
+	t.Option = options
 	t.listener = options.ListenerCh
 	if err := t.start(ctx); err != nil {
 		log.Fatalf("couldn't start backend client: %v\n", err)
@@ -134,19 +134,19 @@ func Start(ctx context.Context, options *TamedOption) *Tamed {
 	return t
 }
 
-func (t *Tamed) Logf(format string, args ...interface{}) {
-	if t.Logger != nil {
-		t.Logger(format, args...)
+func (c *Client) Logf(format string, args ...interface{}) {
+	if c.Logger != nil {
+		c.Logger(format, args...)
 	}
 }
 
 // ActivePeers returns a list of active peers from the current snapshot of peers
-func (t *Tamed) ActivePeers() []PeerStatus {
+func (c *Client) ActivePeers() []PeerStatus {
 	var activePeers []PeerStatus
-	t.RLock()
-	defer t.RUnlock()
-	for _, ps := range t.peers {
-		if t.isActive(ps) {
+	c.RLock()
+	defer c.RUnlock()
+	for _, ps := range c.peers {
+		if c.isActive(ps) {
 			activePeers = append(activePeers, *ps)
 		}
 	}
@@ -154,11 +154,11 @@ func (t *Tamed) ActivePeers() []PeerStatus {
 }
 
 // ActivePeers returns a list of current snapshot of peers
-func (t *Tamed) AllPeers() []PeerStatus {
+func (c *Client) AllPeers() []PeerStatus {
 	var allPeers []PeerStatus
-	t.RLock()
-	defer t.RUnlock()
-	for _, ps := range t.peers {
+	c.RLock()
+	defer c.RUnlock()
+	for _, ps := range c.peers {
 		allPeers = append(allPeers, *ps)
 	}
 	return allPeers
@@ -167,60 +167,60 @@ func (t *Tamed) AllPeers() []PeerStatus {
 // isActive informs whether the peer is active given its LastPingResponse
 // Peer's activeness is from the perspective of the calling node. i.e, Peer A could be inactive according
 // to this node but could be active wrt to all other nodes
-func (t *Tamed) isActive(ps *PeerStatus) bool {
-	return !ps.LastPingResponse.IsZero() && time.Since(ps.LastPingResponse) < t.InactivityTimeLimit
+func (c *Client) isActive(ps *PeerStatus) bool {
+	return !ps.LastPingResponse.IsZero() && time.Since(ps.LastPingResponse) < c.InactivityTimeLimit
 }
 
 // starts backend client to tailscale daemon
-func (t *Tamed) start(ctx context.Context) error {
+func (c *Client) start(ctx context.Context) error {
 	//verifyTailScaleDaemonRunning()
 	// create socket connection with ts running on machine
 	var err error
-	t.conn, err = safesocket.Connect(t.TailScaleSocket, 41112)
+	c.conn, err = safesocket.Connect(c.TailScaleSocket, 41112)
 	if err != nil {
 		return err
 	}
 
 	// create a backend client to communicate with running ts backend
-	t.bc = ipn.NewBackendClient(t.Logf, func(data []byte) {
+	c.bc = ipn.NewBackendClient(c.Logf, func(data []byte) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := ipn.WriteMsg(t.conn, data); err != nil {
+		if err := ipn.WriteMsg(c.conn, data); err != nil {
 			log.Fatalf("error while sending command to ts backend (%v)", err)
 		}
 	})
-	t.bc.AllowVersionSkew = true
+	c.bc.AllowVersionSkew = true
 
 	// set notification callback for ts events
-	t.bc.SetNotifyCallback(t.handleNotificationCallback)
+	c.bc.SetNotifyCallback(c.handleNotificationCallback)
 
 	// start timer once we've client ready
-	t.statusTicker = time.NewTicker(t.HeartbeatInterval)
+	c.statusTicker = time.NewTicker(c.HeartbeatInterval)
 
-	go t.runNotificationReader(ctx)
-	go t.heartbeat(ctx)
+	go c.runNotificationReader(ctx)
+	go c.heartbeat(ctx)
 
 	return nil
 }
 
-func (t *Tamed) handleNotificationCallback(notify ipn.Notify) {
+func (c *Client) handleNotificationCallback(notify ipn.Notify) {
 
 	if notify.ErrMessage != nil {
 		log.Fatalf("notification error from ts backend (%v)", *notify.ErrMessage)
 	}
 	// TODO: handle state
 	if notify.Status != nil {
-		t.updatePeerStatus(notify.Status.Peer)
+		c.updatePeerStatus(notify.Status.Peer)
 	} else if notify.NetMap != nil {
 		// TODO: check if we need to do something about this
 	} else if notify.PingResult != nil {
-		t.updatePingResult(notify.PingResult)
+		c.updatePingResult(notify.PingResult)
 	} else if notify.Engine != nil {
 		// TODO: check if we need to do something about this
 	}
 
-	t.informListener(Notify{Notify: notify})
+	c.informListener(Notify{Notify: notify})
 
 }
 
@@ -238,9 +238,9 @@ func verifyTailScaleDaemonRunning() {
 	//t.Logf("ts backend is running in IP [%v], Interface [%v]", ip.String(), inf.Name)
 }
 
-func (t *Tamed) updatePeerStatus(peers map[key.Public]*ipnstate.PeerStatus) {
-	t.Lock()
-	defer t.Unlock()
+func (c *Client) updatePeerStatus(peers map[key.Public]*ipnstate.PeerStatus) {
+	c.Lock()
+	defer c.Unlock()
 
 	// List of peers we see in the current status
 	currentPeerSet := make(map[string]bool) // map of tailscale ip and presence
@@ -248,29 +248,29 @@ func (t *Tamed) updatePeerStatus(peers map[key.Public]*ipnstate.PeerStatus) {
 	for _, status := range peers {
 		tsip := status.TailAddr
 		currentPeerSet[tsip] = true
-		if _, ok := t.peers[tsip]; !ok {
+		if _, ok := c.peers[tsip]; !ok {
 			// Start peer found
-			t.peers[tsip] = &PeerStatus{firstSeen: time.Now()}
+			c.peers[tsip] = &PeerStatus{firstSeen: time.Now()}
 		}
 		// update IpnPeerStatus
-		t.peers[tsip].IpnPeerStatus = *status
-		t.Logf(t.peers[tsip].String())
+		c.peers[tsip].IpnPeerStatus = *status
+		c.Logf(c.peers[tsip].String())
 	}
 
-	for tsip, peer := range t.peers {
+	for tsip, peer := range c.peers {
 		if _, ok := currentPeerSet[tsip]; !ok {
 			// This peer has been removed so delete from our list of peers
-			t.informListener(Notify{PeerRemoved: &PeerRemoved{&peer.IpnPeerStatus}})
-			delete(t.peers, tsip)
+			c.informListener(Notify{PeerRemoved: &PeerRemoved{&peer.IpnPeerStatus}})
+			delete(c.peers, tsip)
 		}
 	}
 }
 
-func (t *Tamed) updatePingResult(pingResult *ipnstate.PingResult) {
-	t.Lock()
-	defer t.Unlock()
+func (c *Client) updatePingResult(pingResult *ipnstate.PingResult) {
+	c.Lock()
+	defer c.Unlock()
 	tsip := pingResult.NodeIP
-	ps, ok := t.peers[tsip]
+	ps, ok := c.peers[tsip]
 	if !ok || ps == nil {
 		// should not be the case but could've been removed in the mean time
 		return
@@ -280,14 +280,14 @@ func (t *Tamed) updatePingResult(pingResult *ipnstate.PingResult) {
 }
 
 // checks status periodically for every `HeartbeatInterval`
-func (t *Tamed) heartbeat(ctx context.Context) {
+func (c *Client) heartbeat(ctx context.Context) {
 	// initialize peer status by triggering a heartbeat
-	t.triggerHeartbeat()
+	c.triggerHeartbeat()
 
 	for {
 		select {
-		case <-t.statusTicker.C:
-			t.triggerHeartbeat()
+		case <-c.statusTicker.C:
+			c.triggerHeartbeat()
 
 		case <-ctx.Done():
 			return
@@ -295,47 +295,47 @@ func (t *Tamed) heartbeat(ctx context.Context) {
 	}
 }
 
-func (t *Tamed) triggerHeartbeat() {
-	t.Logf("Heart beat triggered at %v\n", time.Now().Format(time.UnixDate))
-	t.bc.RequestStatus()
+func (c *Client) triggerHeartbeat() {
+	c.Logf("Heart beat triggered at %v\n", time.Now().Format(time.UnixDate))
+	c.bc.RequestStatus()
 
-	t.Lock()
-	defer t.Unlock()
+	c.Lock()
+	defer c.Unlock()
 
-	for peerIP, peerStatus := range t.peers {
-		if !t.isActive(peerStatus) {
+	for peerIP, peerStatus := range c.peers {
+		if !c.isActive(peerStatus) {
 			// For inactive peer ping iff lastPing was before InactivePeerHeartBeatInterval
 			if peerStatus.LastPingRequest.IsZero() ||
-				time.Since(peerStatus.LastPingRequest) >= t.InactivePeerHeartBeatInterval {
-				t.pingPeer(peerIP, peerStatus)
+				time.Since(peerStatus.LastPingRequest) >= c.InactivePeerHeartBeatInterval {
+				c.pingPeer(peerIP, peerStatus)
 			}
 		} else {
 			// TODO: optimize calling of ping if we've talked to this IP in the mean time
-			t.pingPeer(peerIP, peerStatus)
+			c.pingPeer(peerIP, peerStatus)
 		}
 
 	}
 }
 
 // wrapper around ping for updating state & event
-func (t *Tamed) pingPeer(peerIP string, peerStatus *PeerStatus) {
-	t.Logf("Pinging %v for membership\n", peerIP)
-	t.bc.Ping(peerIP)
+func (c *Client) pingPeer(peerIP string, peerStatus *PeerStatus) {
+	c.Logf("Pinging %v for membership\n", peerIP)
+	c.bc.Ping(peerIP)
 	pingTime := time.Now()
-	t.informListener(Notify{PingRequest: NewPingRequest(peerStatus, pingTime)})
+	c.informListener(Notify{PingRequest: NewPingRequest(peerStatus, pingTime)})
 	// update this after informing listener about ping request, else we'll update the last ping request
 	peerStatus.LastPingRequest = pingTime
 }
 
 // notify listeners if any
-func (t *Tamed) informListener(notify Notify) {
-	if t.listener != nil {
-		t.listener <- notify
+func (c *Client) informListener(notify Notify) {
+	if c.listener != nil {
+		c.listener <- notify
 	}
 }
 
 // runNotificationReader listens for any message from tailscale daemon and calls handleNotificationCallback
-func (t *Tamed) runNotificationReader(ctx context.Context) {
+func (c *Client) runNotificationReader(ctx context.Context) {
 
 	for {
 		select {
@@ -343,29 +343,29 @@ func (t *Tamed) runNotificationReader(ctx context.Context) {
 			return
 		default:
 			// read from connection
-			msg, err := ipn.ReadMsg(t.conn)
+			msg, err := ipn.ReadMsg(c.conn)
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					// ignorable error
-					t.Logf("use of closed connection\n")
+					c.Logf("use of closed connection\n")
 				} else {
 					log.Fatalf("error while reading notification: %v\n", err)
 				}
 			}
 			if ctx.Err() == nil {
 				// send notification message to the callback
-				t.bc.GotNotifyMsg(msg)
+				c.bc.GotNotifyMsg(msg)
 			}
 		}
 	}
 }
 
-func (t *Tamed) close() {
-	_ = t.conn.Close()
-	t.statusTicker.Stop()
-	if t.listener != nil {
-		ch := t.listener
-		t.listener = nil
+func (c *Client) close() {
+	_ = c.conn.Close()
+	c.statusTicker.Stop()
+	if c.listener != nil {
+		ch := c.listener
+		c.listener = nil
 		close(ch)
 	}
 }

@@ -1,4 +1,4 @@
-package tamp
+package tamed
 
 import (
 	"context"
@@ -96,7 +96,7 @@ func TestStart(t *testing.T) {
 //	}
 //	defer eng.Close()
 //
-//	opts := ipnserver.TamedOption{
+//	opts := ipnserver.Option{
 //		SocketPath: socketPath,
 //	}
 //	t.Logf("pre-Run")
