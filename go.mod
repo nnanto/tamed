@@ -1,4 +1,4 @@
-module github.com/naveenanto22/tamed
+module github.com/nnanto/tamed
 
 go 1.15
 
