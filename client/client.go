@@ -1,25 +1,22 @@
-package tamed
+package client
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"net"
-	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
-	"tailscale.com/net/interfaces"
 	"tailscale.com/paths"
 	"tailscale.com/safesocket"
 	"tailscale.com/types/key"
 	"time"
 )
+
+type LoggerFunc func(string, ...interface{})
 
 // PeerStatus contains information about a single peer
 type PeerStatus struct {
@@ -61,7 +58,8 @@ type Option struct {
 	InactivePeerHeartBeatInterval time.Duration // Time after which an inactive peer should be pinged
 	TailScaleSocket               string
 	ListenerCh                    chan Notify
-	Logger                        func(string, ...interface{})
+	Logger                        LoggerFunc
+	StartServer                   bool
 }
 
 func DefaultOptions() *Option {
@@ -84,8 +82,9 @@ type PingRequest struct {
 	PrevPingAt    time.Time
 }
 
-func NewPingRequest(ps *PeerStatus, pingTime time.Time) *PingRequest {
-	return &PingRequest{CurrentPingAt: pingTime, PrevPingAt: ps.LastPingRequest, PeerStatus: &ps.IpnPeerStatus}
+// Ping sends a ping request to the peer
+func Ping(ps *PeerStatus) *PingRequest {
+	return &PingRequest{CurrentPingAt: time.Now(), PrevPingAt: ps.LastPingRequest, PeerStatus: &ps.IpnPeerStatus}
 }
 
 type Notify struct {
@@ -104,15 +103,13 @@ type Client struct {
 	bc           *ipn.BackendClient     // TailScale backend client to the daemon
 	peers        map[string]*PeerStatus // map from TailScale IP to PeerStatus
 	statusTicker *time.Ticker           // Ticker for heartbeat ping message & status update
-	cls          chan struct{}          // channel to notify close
 	*Option
 }
 
-// Start attaches a tailScale client to machine's running daemon
+// Start starts a tailScale client attached to machine's running daemon
 func Start(ctx context.Context, options *Option) *Client {
 	t := &Client{
-		peers:make(map[string]*PeerStatus),
-		cls : make(chan struct{}),
+		peers: make(map[string]*PeerStatus),
 	}
 	if options == nil {
 		options = DefaultOptions()
@@ -122,18 +119,6 @@ func Start(ctx context.Context, options *Option) *Client {
 	if err := t.start(ctx); err != nil {
 		log.Fatalf("couldn't start backend client: %v\n", err)
 	}
-
-	go func() {
-		interrupt := make(chan os.Signal, 1)
-		// listen to interrupt
-		signal.Notify(interrupt, syscall.SIGINT, syscall.SIGTERM)
-		// wait for either interrupt to happen or context to get over
-		select {
-		case <-interrupt:
-		case <-ctx.Done():
-		}
-		t.close()
-	}()
 
 	return t
 }
@@ -190,13 +175,8 @@ func (c *Client) start(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return
 		}
-		// allow version skewing
-		cmd := &ipn.Command{}
-		_ = json.Unmarshal(data, cmd)
-		cmd.AllowVersionSkew = true
-		b, _ := json.Marshal(cmd)
 
-		if err := ipn.WriteMsg(c.conn, b); err != nil {
+		if err := ipn.WriteMsg(c.conn, data); err != nil {
 			log.Fatalf("error while sending command to ts backend (%v)", err)
 		}
 	})
@@ -209,8 +189,8 @@ func (c *Client) start(ctx context.Context) error {
 	c.statusTicker = time.NewTicker(c.HeartbeatInterval)
 
 	go c.runNotificationReader(ctx)
-	go c.heartbeat(ctx)
 
+	go c.heartbeat(ctx)
 	return nil
 }
 
@@ -234,20 +214,6 @@ func (c *Client) handleNotificationCallback(notify ipn.Notify) {
 
 }
 
-// check if we've TailScale daemon running
-func verifyTailScaleDaemonRunning() {
-	ip, inf, err := interfaces.Tailscale()
-	errmsg := "error connecting to local tailscale"
-
-	if err != nil {
-		log.Fatalf(errmsg+" (%v)", err)
-	}
-	if ip == nil || inf == nil {
-		log.Fatalf(errmsg)
-	}
-	//t.Logf("ts backend is running in IP [%v], Interface [%v]", ip.String(), inf.Name)
-}
-
 func (c *Client) updatePeerStatus(peers map[key.Public]*ipnstate.PeerStatus) {
 	c.Lock()
 	defer c.Unlock()
@@ -259,7 +225,7 @@ func (c *Client) updatePeerStatus(peers map[key.Public]*ipnstate.PeerStatus) {
 		tsip := status.TailAddr
 		currentPeerSet[tsip] = true
 		if _, ok := c.peers[tsip]; !ok {
-			// Start peer found
+			// peer found
 			c.peers[tsip] = &PeerStatus{firstSeen: time.Now()}
 		}
 		// update IpnPeerStatus
@@ -299,9 +265,6 @@ func (c *Client) heartbeat(ctx context.Context) {
 		case <-c.statusTicker.C:
 			c.triggerHeartbeat()
 
-		case <-c.cls:
-			return
-
 		case <-ctx.Done():
 			return
 		}
@@ -335,7 +298,7 @@ func (c *Client) pingPeer(peerIP string, peerStatus *PeerStatus) {
 	c.Logf("Pinging %v for membership\n", peerIP)
 	c.bc.Ping(peerIP)
 	pingTime := time.Now()
-	c.informListener(Notify{PingRequest: NewPingRequest(peerStatus, pingTime)})
+	c.informListener(Notify{PingRequest: Ping(peerStatus)})
 	// update this after informing listener about ping request, else we'll update the last ping request
 	peerStatus.LastPingRequest = pingTime
 }
@@ -353,8 +316,6 @@ func (c *Client) runNotificationReader(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-c.cls:
 			return
 		default:
 			// read from connection
@@ -376,8 +337,6 @@ func (c *Client) runNotificationReader(ctx context.Context) {
 }
 
 func (c *Client) close() {
-	close(c.cls)
-	c.Logf("stopped all long running loops")
 	_ = c.conn.Close()
 	c.statusTicker.Stop()
 	c.Logf("closed connection and ticker")

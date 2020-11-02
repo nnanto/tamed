@@ -1,4 +1,4 @@
-package tamed
+package client
 
 import (
 	"context"
