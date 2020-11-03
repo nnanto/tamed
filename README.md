@@ -1,4 +1,4 @@
-# TAMED (Tailscale As MEmbership Discovery)
+# TAMED (Tailscale As Membership Discovery)
 
 TAMED client is a tailscale client that maintains membership information of peers. This is achieved by sending and receiving heartbeat pings to connected peers. 
 
