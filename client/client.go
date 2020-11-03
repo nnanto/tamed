@@ -1,3 +1,5 @@
+// client is a tamed client that attaches itself to the running tailscale daemon.
+// It receives events and maintains peer's membership (map) by sending & receiving heartbeat pings
 package client
 
 import (
@@ -16,6 +18,7 @@ import (
 	"time"
 )
 
+// LoggerFunc provides logging interface for tamed client
 type LoggerFunc func(format string, args ...interface{})
 
 // PeerStatus contains information about a single peer
@@ -303,10 +306,15 @@ func (c *Client) pingPeer(peerIP string, peerStatus *PeerStatus) {
 	peerStatus.LastPingRequest = pingTime
 }
 
-// notify listeners if any
+// notify listeners if any present and is actively receiving notification
 func (c *Client) informListener(notify Notify) {
 	if c.listener != nil {
-		c.listener <- notify
+		select {
+		case c.listener <- notify:
+		default:
+
+		}
+
 	}
 }
 

@@ -11,3 +11,6 @@ Tamed Server starts a tailscale service that communicates with the tailscale coo
 ## Client
 Client communicates with the server and receives events from control plane or other peers in the network.
 Client provides a list of **active peers** in the current network by tracking heartbeat between peers
+
+
+####[How to use](https://github.com/nnanto/tamed/tree/main/example)

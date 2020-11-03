@@ -1,3 +1,5 @@
+// server starts tailscale daemon
+// requires root permission
 package server
 
 import (
