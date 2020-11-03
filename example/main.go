@@ -13,26 +13,37 @@ func main() {
 	defer done()
 
 	serverNotification := make(chan server.Notify)
-	go server.Start(ctx, log.Printf, serverNotification)
-
+	// start a server
+	go func() {
+		if err := server.Start(ctx, nil, serverNotification); err != nil {
+			log.Fatalf("Unable to start tailscaled server: %v", err)
+		}
+	}()
 
 	for notify := range serverNotification {
-		if notify.Authenticated != nil{
-			startClient(ctx)
+		if notify.Authenticated != nil {
+			// start client once we get authenticated message
+			if err := startClient(ctx); err != nil {
+				log.Fatalf("Unable to start tamed client: %v\n", err)
+			}
 		}
 	}
-
-
 }
 
-func startClient(ctx context.Context) {
+func startClient(ctx context.Context) error {
 	option := client.DefaultOptions()
 	option.ListenerCh = make(chan client.Notify)
 	option.Logger = log.Printf
-	client.Start(ctx, option)
 	go listen(option.ListenerCh)
+
+
+	if _, err := client.Start(ctx, option); err != nil {
+		return err
+	}
+	return nil
 }
 
+// listen receives notification from tamed client
 func listen(ch chan client.Notify) {
 	for notify := range ch {
 		if notify.PingRequest != nil {

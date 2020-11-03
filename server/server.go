@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"github.com/nnanto/tamed/client"
-	"log"
 	"runtime"
 	"strings"
 	"tailscale.com/control/controlclient"
@@ -27,6 +25,7 @@ func defaultTunName() string {
 const (
 	PORT = 41112
 	StateFilePath = "/var/lib/tailscale/tailscaled.state"
+	LogId = "tamed-log-id"
 )
 
 const (
@@ -34,7 +33,6 @@ const (
 	startIndicatingLogMsg = "Listening on " // log message indicating start of server
 	authLoginLogMsg       = "control: AuthURL is "
 	authenticatedLogMsg   = "control: authRoutine"
-	logCollectionName     = "tailnode.log.tailscale.io"
 )
 
 type Notify struct {
@@ -44,8 +42,10 @@ type Notify struct {
 	Stopped       *string
 }
 
-// Start starts the server. Listen on readyCh to
-func Start(ctx context.Context, logf client.LoggerFunc, readyCh chan<- Notify) {
+type LoggerFunc func(format string, args ...interface{})
+
+// Start starts the server. Listen on readyCh to receive notification from server
+func Start(ctx context.Context, logf LoggerFunc, readyCh chan<- Notify) error {
 	opts := ipnserver.Options{
 		SocketPath:         paths.DefaultTailscaledSocket(),
 		Port:               PORT,
@@ -56,7 +56,21 @@ func Start(ctx context.Context, logf client.LoggerFunc, readyCh chan<- Notify) {
 		DebugMux:           nil,
 	}
 
-	lm := func(format string, args ...interface{}) {
+	lm := logListener(readyCh, logf)
+
+	e, err := wgengine.NewUserspaceEngine(lm, defaultTunName(), 41641)
+	if err != nil {
+		return err
+	}
+	err = ipnserver.Run(ctx, lm, LogId, ipnserver.FixedEngine(e), opts)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func logListener(readyCh chan<- Notify, logf LoggerFunc) func(format string, args ...interface{}) {
+	return func(format string, args ...interface{}) {
 
 		if strings.HasPrefix(format, startIndicatingLogMsg) {
 			readyCh <- Notify{Started: &format}
@@ -71,17 +85,9 @@ func Start(ctx context.Context, logf client.LoggerFunc, readyCh chan<- Notify) {
 				}
 			}
 		}
-
+		// send to client logger
 		if logf != nil {
 			logf(format, args...)
 		}
-	}
-
-	//pol := logpolicy.New(logCollectionName)
-	e, _ := wgengine.NewUserspaceEngine(lm, defaultTunName(), 41641)
-
-	err := ipnserver.Run(ctx, lm, "1234", ipnserver.FixedEngine(e), opts)
-	if err != nil {
-		log.Fatalf("Couldn't start tailscale server : %v", err)
 	}
 }

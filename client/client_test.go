@@ -16,7 +16,8 @@ func TestStart(t *testing.T) {
 	op.InactivePeerHeartBeatInterval = 10 * time.Second
 	op.ListenerCh = make(chan Notify, 1)
 	op.Logger = log.Printf
-	tsc := Start(ctx, op)
+	tsc, err := Start(ctx, op)
+	require.NoError(t, err)
 	var statusTicks uint64 = 0
 	go func() {
 		for n := range op.ListenerCh {
@@ -59,7 +60,7 @@ func TestStart(t *testing.T) {
 //
 //	logf := func(format string, args ...interface{}) {
 //		format = strings.TrimRight(format, "\n")
-//		t.Logf(format, args...)
+//		t.logf(format, args...)
 //	}
 //
 //	connect := func() {
@@ -99,7 +100,7 @@ func TestStart(t *testing.T) {
 //	opts := ipnserver.Option{
 //		SocketPath: socketPath,
 //	}
-//	t.Logf("pre-Run")
+//	t.logf("pre-Run")
 //	err = ipnserver.Run(ctx, logTriggerTestf, "dummy_logid", ipnserver.FixedEngine(eng), opts)
-//	t.Logf("ipnserver.Run = %v", err)
+//	t.logf("ipnserver.Run = %v", err)
 //}

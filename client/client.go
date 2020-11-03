@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-type LoggerFunc func(string, ...interface{})
+type LoggerFunc func(format string, args ...interface{})
 
 // PeerStatus contains information about a single peer
 type PeerStatus struct {
@@ -107,7 +107,7 @@ type Client struct {
 }
 
 // Start starts a tailScale client attached to machine's running daemon
-func Start(ctx context.Context, options *Option) *Client {
+func Start(ctx context.Context, options *Option) (*Client, error) {
 	t := &Client{
 		peers: make(map[string]*PeerStatus),
 	}
@@ -117,13 +117,13 @@ func Start(ctx context.Context, options *Option) *Client {
 	t.Option = options
 	t.listener = options.ListenerCh
 	if err := t.start(ctx); err != nil {
-		log.Fatalf("couldn't start backend client: %v\n", err)
+		return nil, err
 	}
 
-	return t
+	return t, nil
 }
 
-func (c *Client) Logf(format string, args ...interface{}) {
+func (c *Client) logf(format string, args ...interface{}) {
 	if c.Logger != nil {
 		c.Logger(format, args...)
 	}
@@ -171,13 +171,13 @@ func (c *Client) start(ctx context.Context) error {
 	}
 
 	// create a backend client to communicate with running ts backend
-	c.bc = ipn.NewBackendClient(c.Logf, func(data []byte) {
+	c.bc = ipn.NewBackendClient(c.logf, func(data []byte) {
 		if ctx.Err() != nil {
 			return
 		}
 
 		if err := ipn.WriteMsg(c.conn, data); err != nil {
-			log.Fatalf("error while sending command to ts backend (%v)", err)
+			log.Fatalf("error while sending command to ts backend %v", err)
 		}
 	})
 	c.bc.AllowVersionSkew = true
@@ -197,7 +197,7 @@ func (c *Client) start(ctx context.Context) error {
 func (c *Client) handleNotificationCallback(notify ipn.Notify) {
 
 	if notify.ErrMessage != nil {
-		log.Fatalf("notification error from ts backend (%v)", *notify.ErrMessage)
+		c.logf("notification error from ts backend (%v)", *notify.ErrMessage)
 	}
 	// TODO: handle state
 	if notify.Status != nil {
@@ -230,7 +230,7 @@ func (c *Client) updatePeerStatus(peers map[key.Public]*ipnstate.PeerStatus) {
 		}
 		// update IpnPeerStatus
 		c.peers[tsip].IpnPeerStatus = *status
-		c.Logf(c.peers[tsip].String())
+		c.logf(c.peers[tsip].String())
 	}
 
 	for tsip, peer := range c.peers {
@@ -272,7 +272,7 @@ func (c *Client) heartbeat(ctx context.Context) {
 }
 
 func (c *Client) triggerHeartbeat() {
-	c.Logf("Heart beat triggered at %v\n", time.Now().Format(time.UnixDate))
+	c.logf("Heart beat triggered at %v\n", time.Now().Format(time.UnixDate))
 	c.bc.RequestStatus()
 
 	c.Lock()
@@ -295,7 +295,7 @@ func (c *Client) triggerHeartbeat() {
 
 // wrapper around ping for updating state & event
 func (c *Client) pingPeer(peerIP string, peerStatus *PeerStatus) {
-	c.Logf("Pinging %v for membership\n", peerIP)
+	c.logf("Pinging %v for membership\n", peerIP)
 	c.bc.Ping(peerIP)
 	pingTime := time.Now()
 	c.informListener(Notify{PingRequest: Ping(peerStatus)})
@@ -323,7 +323,7 @@ func (c *Client) runNotificationReader(ctx context.Context) {
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					// ignorable error
-					c.Logf("use of closed connection\n")
+					c.logf("use of closed connection\n")
 				} else {
 					log.Fatalf("error while reading notification: %v\n", err)
 				}
@@ -339,12 +339,12 @@ func (c *Client) runNotificationReader(ctx context.Context) {
 func (c *Client) close() {
 	_ = c.conn.Close()
 	c.statusTicker.Stop()
-	c.Logf("closed connection and ticker")
+	c.logf("closed connection and ticker")
 	if c.listener != nil {
 		ch := c.listener
 		c.listener = nil
 
 		close(ch)
-		c.Logf("closed external listener")
+		c.logf("closed external listener")
 	}
 }
