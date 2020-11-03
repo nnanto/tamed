@@ -4,6 +4,7 @@ TAMED client is a tailscale client that maintains membership information of peer
 
 ## Server
 [Example](https://github.com/nnanto/tamed/tree/main/example/server)
+
 Tamed Server starts a tailscale service that communicates with the tailscale coordination server (control plane)
 
 ## Client
