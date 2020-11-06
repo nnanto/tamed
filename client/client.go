@@ -106,6 +106,7 @@ type Client struct {
 	bc           *ipn.BackendClient     // TailScale backend client to the daemon
 	peers        map[string]*PeerStatus // map from TailScale IP to PeerStatus
 	statusTicker *time.Ticker           // Ticker for heartbeat ping message & status update
+	SelfStatus   *ipnstate.PeerStatus
 	*Option
 }
 
@@ -204,6 +205,10 @@ func (c *Client) handleNotificationCallback(notify ipn.Notify) {
 	}
 	// TODO: handle state
 	if notify.Status != nil {
+
+		if c.SelfStatus == nil {
+			c.SelfStatus = notify.Status.Self
+		}
 		c.updatePeerStatus(notify.Status.Peer)
 	} else if notify.NetMap != nil {
 		// TODO: check if we need to do something about this
