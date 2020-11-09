@@ -106,14 +106,13 @@ type Client struct {
 	bc           *ipn.BackendClient     // TailScale backend client to the daemon
 	peers        map[string]*PeerStatus // map from TailScale IP to PeerStatus
 	statusTicker *time.Ticker           // Ticker for heartbeat ping message & status update
-	SelfStatus   *ipnstate.PeerStatus
 	*Option
 }
 
 // Start starts a tailScale client attached to machine's running daemon
 func Start(ctx context.Context, options *Option) (*Client, error) {
 	t := &Client{
-		peers: make(map[string]*PeerStatus),
+		peers:        make(map[string]*PeerStatus),
 	}
 	if options == nil {
 		options = DefaultOptions()
@@ -195,6 +194,7 @@ func (c *Client) start(ctx context.Context) error {
 	go c.runNotificationReader(ctx)
 
 	go c.heartbeat(ctx)
+
 	return nil
 }
 
@@ -203,12 +203,9 @@ func (c *Client) handleNotificationCallback(notify ipn.Notify) {
 	if notify.ErrMessage != nil {
 		c.logf("notification error from ts backend (%v)", *notify.ErrMessage)
 	}
-	// TODO: handle state
-	if notify.Status != nil {
 
-		if c.SelfStatus == nil {
-			c.SelfStatus = notify.Status.Self
-		}
+
+	if notify.Status != nil {
 		c.updatePeerStatus(notify.Status.Peer)
 	} else if notify.NetMap != nil {
 		// TODO: check if we need to do something about this
@@ -301,7 +298,7 @@ func (c *Client) triggerHeartbeat() {
 	}
 }
 
-// wrapper around ping for updating state & event
+// wrapper around tailscale ping
 func (c *Client) pingPeer(peerIP string, peerStatus *PeerStatus) {
 	c.logf("Pinging %v for membership\n", peerIP)
 	c.bc.Ping(peerIP)
